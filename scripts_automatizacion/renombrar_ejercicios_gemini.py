@@ -24,10 +24,11 @@ import time
 from pathlib import Path
 
 try:
-    import google.generativeai as genai
+    from google import genai
+    from google.genai import types as genai_types
 except ImportError:
     sys.exit(
-        "Dependencia faltante. Ejecuta:\n  pip install google-generativeai"
+        "Dependencia faltante. Ejecuta:\n  pip install google-genai"
     )
 
 # Extensiones de vídeo soportadas por la File API de Gemini
@@ -100,17 +101,20 @@ def cargar_api_key() -> str:
 # Lógica de Gemini
 # ---------------------------------------------------------------------------
 
-def subir_y_esperar(ruta: Path, verbose: bool = True) -> genai.types.File:
+def subir_y_esperar(cliente: genai.Client, ruta: Path, verbose: bool = True):
     """Sube el vídeo a la File API y espera hasta que esté listo."""
     if verbose:
         print(f"  Subiendo '{ruta.name}'...", end=" ", flush=True)
 
-    fichero = genai.upload_file(path=str(ruta), mime_type="video/mp4")
+    fichero = cliente.files.upload(
+        file=str(ruta),
+        config=genai_types.UploadFileConfig(mime_type="video/mp4"),
+    )
 
     # Espera activa hasta estado ACTIVE (puede tardar según tamaño)
     while fichero.state.name == "PROCESSING":
         time.sleep(5)
-        fichero = genai.get_file(fichero.name)
+        fichero = cliente.files.get(name=fichero.name)
 
     if fichero.state.name != "ACTIVE":
         raise RuntimeError(
@@ -122,17 +126,20 @@ def subir_y_esperar(ruta: Path, verbose: bool = True) -> genai.types.File:
     return fichero
 
 
-def identificar_ejercicio(fichero_gemini, modelo: genai.GenerativeModel) -> str:
+def identificar_ejercicio(cliente: genai.Client, fichero_gemini, nombre_modelo: str) -> str:
     """Envía el vídeo a Gemini y devuelve el nombre del ejercicio limpio."""
-    respuesta = modelo.generate_content([fichero_gemini, PROMPT_ANALISIS])
+    respuesta = cliente.models.generate_content(
+        model=nombre_modelo,
+        contents=[fichero_gemini, PROMPT_ANALISIS],
+    )
     texto = respuesta.text.strip()
     return limpiar_nombre(texto)
 
 
-def eliminar_fichero_remoto(fichero_gemini) -> None:
+def eliminar_fichero_remoto(cliente: genai.Client, fichero_gemini) -> None:
     """Borra el fichero de la File API para no consumir cuota de almacenamiento."""
     try:
-        genai.delete_file(fichero_gemini.name)
+        cliente.files.delete(name=fichero_gemini.name)
     except Exception:
         pass  # No es crítico si falla la limpieza
 
@@ -141,7 +148,7 @@ def eliminar_fichero_remoto(fichero_gemini) -> None:
 # Proceso principal
 # ---------------------------------------------------------------------------
 
-def procesar_carpeta(carpeta: Path, nombre_modelo: str, dry_run: bool) -> None:
+def procesar_carpeta(cliente: genai.Client, carpeta: Path, nombre_modelo: str, dry_run: bool) -> None:
     videos = [
         f for f in sorted(carpeta.iterdir())
         if f.is_file() and f.suffix.lower() in EXTENSIONES_VIDEO
@@ -152,7 +159,6 @@ def procesar_carpeta(carpeta: Path, nombre_modelo: str, dry_run: bool) -> None:
         return
 
     print(f"Vídeos encontrados: {len(videos)}\n")
-    modelo = genai.GenerativeModel(model_name=nombre_modelo)
 
     exitosos, fallidos = 0, 0
 
@@ -160,8 +166,8 @@ def procesar_carpeta(carpeta: Path, nombre_modelo: str, dry_run: bool) -> None:
         print(f"[{i}/{len(videos)}] {ruta.name}")
         fichero_gemini = None
         try:
-            fichero_gemini = subir_y_esperar(ruta)
-            ejercicio = identificar_ejercicio(fichero_gemini, modelo)
+            fichero_gemini = subir_y_esperar(cliente, ruta)
+            ejercicio = identificar_ejercicio(cliente, fichero_gemini, nombre_modelo)
             print(f"  Ejercicio detectado: {ejercicio}")
 
             destino = nombre_sin_colision(ruta.parent / f"{ejercicio}{ruta.suffix.lower()}")
@@ -180,7 +186,7 @@ def procesar_carpeta(carpeta: Path, nombre_modelo: str, dry_run: bool) -> None:
 
         finally:
             if fichero_gemini:
-                eliminar_fichero_remoto(fichero_gemini)
+                eliminar_fichero_remoto(cliente, fichero_gemini)
 
         print()
 
@@ -194,7 +200,7 @@ def procesar_carpeta(carpeta: Path, nombre_modelo: str, dry_run: bool) -> None:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Renombra vídeos de ejercicios usando Gemini (IEC 60909)."
+        description="Renombra vídeos de ejercicios usando Gemini."
     )
     parser.add_argument(
         "--carpeta",
@@ -217,8 +223,8 @@ def main():
     if not args.carpeta.is_dir():
         sys.exit(f"La carpeta '{args.carpeta}' no existe o no es un directorio.")
 
-    genai.configure(api_key=cargar_api_key())
-    procesar_carpeta(args.carpeta, args.modelo, args.dry_run)
+    cliente = genai.Client(api_key=cargar_api_key())
+    procesar_carpeta(cliente, args.carpeta, args.modelo, args.dry_run)
 
 
 if __name__ == "__main__":
